@@ -8,6 +8,7 @@ import theano
 from theano import tensor as T
 from theano import function
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+import time
 import numpy as np
 import pandas as pd
 from collections import OrderedDict
@@ -15,7 +16,7 @@ srng = RandomStreams()
 class GRU4Rec:
     '''
     GRU4Rec(layers, n_epochs=10, batch_size=50, dropout_p_hidden=0.4, learning_rate=0.05, momentum=0.0, adapt='adagrad', decay=0.9, grad_cap=0, sigma=0, init_as_normal=False, reset_after_session=True, loss='top1', hidden_act='tanh', final_act=None, train_random_order=False, lmbd=0.0, session_key='SessionId', item_key='ItemId', time_key='Time')
-    
+
     Initializes the network.
 
     Parameters
@@ -46,9 +47,9 @@ class GRU4Rec:
         whether the hidden state is set to zero after a session finished (default: True)
     loss : 'top1', 'bpr' or 'cross-entropy'
         selects the loss function (default: 'top1')
-    hidden_act : 'tanh' or 'relu' 
+    hidden_act : 'tanh' or 'relu'
         selects the activation function on the hidden states (default: 'tanh')
-    final_act : None, 'linear', 'relu' or 'tanh' 
+    final_act : None, 'linear', 'relu' or 'tanh'
         selects the activation function of the final layer where appropriate (cross-entropy always uses softmax), None means default (tanh if the loss is brp or top1) (default: None)
     train_random_order : boolean
         whether to randomize the order of sessions in each epoch (default: False)
@@ -60,10 +61,10 @@ class GRU4Rec:
         header of the item ID column in the input file (default: 'ItemId')
     time_key : string
         header of the timestamp column in the input file (default: 'Time')
-        
+
     '''
-    def __init__(self, layers, n_epochs=10, batch_size=50, dropout_p_hidden=0.4, learning_rate=0.05, momentum=0.0, adapt='adagrad', decay=0.9, grad_cap=0, sigma=0, 
-                 init_as_normal=False, reset_after_session=True, loss='top1', hidden_act='tanh', final_act=None, train_random_order=False, lmbd=0.0, 
+    def __init__(self, layers, n_epochs=10, batch_size=50, dropout_p_hidden=0.4, learning_rate=0.05, momentum=0.0, adapt='adagrad', decay=0.9, grad_cap=0, sigma=0,
+                 init_as_normal=False, reset_after_session=True, loss='top1', hidden_act='tanh', final_act=None, train_random_order=False, lmbd=0.0,
                  session_key='SessionId', item_key='ItemId', time_key='Time'):
         self.layers = layers
         self.n_epochs = n_epochs
@@ -139,7 +140,7 @@ class GRU4Rec:
     #Use linear or tanh activation function as the output with error-rate
     def top1(self, yhat):
         return T.cast(T.mean(T.mean(T.nnet.sigmoid(-T.diag(yhat)+yhat.T)+T.nnet.sigmoid(yhat.T**2), axis=0)-T.nnet.sigmoid(T.diag(yhat)**2)/self.batch_size), theano.config.floatX)
-    
+
     ###############################################################################
     def floatX(self, X):
         return np.asarray(X, dtype=theano.config.floatX)
@@ -266,43 +267,50 @@ class GRU4Rec:
             y = h
         y = self.final_activation(T.dot(y, self.Wy.T) + self.By.flatten())
         return H_new, y
+
+
     def fit(self, data):
-        ''' 
+        '''
         Trains the network.
-        
+
         Parameters
         --------
         data: pandas.DataFrame
             Training data. It contains the transactions of the sessions. It has one column for session IDs, one for item IDs and one for the timestamp of the events (unix timestamps).
             It must have a header. Column names are arbitrary, but must correspond to the ones you set during the initialization of the network (session_key, item_key, time_key properties).
-            
+
         '''
         self.predict = None
         self.error_during_train = False
         itemids = data[self.item_key].unique()
         self.n_items = len(itemids)
         self.itemidmap = pd.Series(data=np.arange(self.n_items), index=itemids)
-        data = pd.merge(data, pd.DataFrame({self.item_key:itemids, 'ItemIdx':self.itemidmap[itemids].values}), on=self.item_key, how='inner')
+        data = pd.merge(data, pd.DataFrame(
+            {self.item_key:itemids, 'ItemIdx':self.itemidmap[itemids].values}),
+                        on=self.item_key, how='inner')
         offset_sessions = self.init(data)
-        
+
         X = T.ivector()
         Y = T.ivector()
         H_new, Y_pred, sampled_params = self.model(X, self.H, Y, self.dropout_p_hidden)
-        cost = self.loss_function(Y_pred) 
-        params = [self.Wx[1:], self.Wr[1:], self.Wz[1:], self.Wh, self.Whr, self.Whz, self.Bh, self.Br, self.Bz]
+        cost = self.loss_function(Y_pred)
+        params = [self.Wx[1:], self.Wr[1:], self.Wz[1:],
+                  self.Wh, self.Whr, self.Whz, self.Bh, self.Br, self.Bz]
         full_params = [self.Wx[0], self.Wr[0], self.Wz[0], self.Wy, self.By]
         sidxs = [X, X, X, Y, Y]
-        updates = self.RMSprop(cost, params, full_params, sampled_params, sidxs)  
+        updates = self.RMSprop(cost, params, full_params, sampled_params, sidxs)
         for i in range(len(self.H)):
             updates[self.H[i]] = H_new[i]
-        train_function = function(inputs=[X, Y], outputs=cost, updates=updates, allow_input_downcast=True)
-        
-        
+        train_function = function(inputs=[X, Y], outputs=cost,
+                                  updates=updates, allow_input_downcast=True)
+
         for epoch in range(self.n_epochs):
             for i in range(len(self.layers)):
-                self.H[i].set_value(np.zeros((self.batch_size,self.layers[i]), dtype=theano.config.floatX), borrow=True)
+                self.H[i].set_value(np.zeros((self.batch_size,self.layers[i]),
+                                             dtype=theano.config.floatX), borrow=True)
             c = []
-            session_idx_arr = np.random.permutation(len(offset_sessions)-1) if self.train_random_order else np.arange(len(offset_sessions)-1)
+            session_idx_arr = (np.random.permutation(len(offset_sessions)-1)
+                               if self.train_random_order else np.arange(len(offset_sessions)-1))
             iters = np.arange(self.batch_size)
             maxiter = iters.max()
             start = offset_sessions[session_idx_arr[iters]]
@@ -338,18 +346,19 @@ class GRU4Rec:
                     end[idx] = offset_sessions[session_idx_arr[maxiter]+1]
             avgc = np.mean(c)
             if np.isnan(avgc):
-                print('Epoch {}: NaN error!'.format(str(epoch)))
+                print(time.ctime() + '  Epoch {}: NaN error!'.format(str(epoch)))
                 self.error_during_train = True
                 return
-            print('Epoch{}\tloss: {:.6f}'.format(epoch, avgc))
+            print(time.ctime() + '  Epoch{}\tloss: {:.6f}'.format(epoch, avgc))
+
 
     def predict_next_batch(self, session_ids, input_item_ids, predict_for_item_ids=None, batch=100):
         '''
         Gives predicton scores for a selected set of items. Can be used in batch mode to predict for multiple independent events (i.e. events of different sessions) at once and thus speed up evaluation.
-        
+
         If the session ID at a given coordinate of the session_ids parameter remains the same during subsequent calls of the function, the corresponding hidden state of the network will be kept intact (i.e. that's how one can predict an item to a session).
         If it changes, the hidden state of the network is reset to zeros.
-                
+
         Parameters
         --------
         session_ids : 1D array
@@ -360,20 +369,21 @@ class GRU4Rec:
             IDs of items for which the network should give prediction scores. Every ID must be in the training set. The default value is None, which means that the network gives prediction on its every output (i.e. for all items in the training set).
         batch : int
             Prediction batch size.
-            
+
         Returns
         --------
         out : pandas.DataFrame
-            Prediction scores for selected items for every event of the batch. 
+            Prediction scores for selected items for every event of the batch.
             Columns: events of the batch; rows: items. Rows are indexed by the item IDs.
-        
+
         '''
         if self.error_during_train: raise Exception
         if self.predict is None or self.predict_batch!=batch:
             X = T.ivector()
             Y = T.ivector()
             for i in range(len(self.layers)):
-                self.H[i].set_value(np.zeros((batch,self.layers[i]), dtype=theano.config.floatX), borrow=True)
+                self.H[i].set_value(np.zeros((batch,self.layers[i]),
+                                             dtype=theano.config.floatX), borrow=True)
             if predict_for_item_ids is not None:
                 H_new, yhat, _ = self.model(X, self.H, Y, 0)
             else:
@@ -382,9 +392,11 @@ class GRU4Rec:
             for i in range(len(self.H)):
                 updatesH[self.H[i]] = H_new[i]
             if predict_for_item_ids is not None:
-                self.predict = function(inputs=[X, Y], outputs=yhat, updates=updatesH, allow_input_downcast=True)
+                self.predict = function(inputs=[X, Y], outputs=yhat, updates=updatesH,
+                                        allow_input_downcast=True)
             else:
-                self.predict = function(inputs=[X], outputs=yhat, updates=updatesH, allow_input_downcast=True)
+                self.predict = function(inputs=[X], outputs=yhat, updates=updatesH,
+                                        allow_input_downcast=True)
             self.current_session = np.ones(batch) * -1
             self.predict_batch = batch
         session_change = np.arange(batch)[session_ids != self.current_session]
