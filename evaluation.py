@@ -8,7 +8,7 @@ Created on Fri Jun 26 17:27:26 2015
 import numpy as np
 import pandas as pd
 
-def evaluate_sessions_batch(pr, test_data, items=None, cut_off=20, batch_size=100, break_ties=False, session_key='SessionId', item_key='ItemId', time_key='Time'):
+def evaluate_sessions_batch(pr, test_data, items=None, cut_offs=[1,2,3,4,5,6,7,8,9,10,20], batch_size=100, break_ties=False, session_key='SessionId', item_key='ItemId', time_key='Time'):
     '''
     Evaluates the GRU4Rec network wrt. recommendation accuracy measured by recall@N and MRR@N.
 
@@ -26,7 +26,7 @@ def evaluate_sessions_batch(pr, test_data, items=None, cut_off=20, batch_size=10
     batch_size : int
         Number of events bundled into a batch during evaluation. Speeds up evaluation. If it is set high, the memory consumption increases. Default value is 100.
     break_ties : boolean
-        Whether to add a small random number to each prediction value in order to break up possible ties, which can mess up the evaluation. 
+        Whether to add a small random number to each prediction value in order to break up possible ties, which can mess up the evaluation.
         Defaults to False, because (1) GRU4Rec usually does not produce ties, except when the output saturates; (2) it slows down the evaluation.
         Set to True is you expect lots of ties.
     session_key : string
@@ -35,19 +35,22 @@ def evaluate_sessions_batch(pr, test_data, items=None, cut_off=20, batch_size=10
         Header of the item ID column in the input file (default: 'ItemId')
     time_key : string
         Header of the timestamp column in the input file (default: 'Time')
-    
+
     Returns
     --------
     out : tuple
         (Recall@N, MRR@N)
-    
+
     '''
     pr.predict = None #In case someone would try to run with both items=None and not None on the same model without realizing that the predict function needs to be replaced
     test_data.sort_values([session_key, time_key], inplace=True)
     offset_sessions = np.zeros(test_data[session_key].nunique()+1, dtype=np.int32)
     offset_sessions[1:] = test_data.groupby(session_key).size().cumsum()
     evalutation_point_count = 0
-    mrr, recall = 0.0, 0.0
+    #mrr, recall = 0.0, 0.0
+    n_eval_ranks = len(cut_offs)
+    mrr, recall = np.zeros(n_eval_ranks), np.zeros(n_eval_ranks)
+
     if len(offset_sessions) - 1 < batch_size:
         batch_size = len(offset_sessions) - 1
     iters = np.arange(batch_size).astype(np.int32)
@@ -80,9 +83,10 @@ def evaluate_sessions_batch(pr, test_data, items=None, cut_off=20, batch_size=10
                 ranks = (others > targets).sum(axis=0) +1
             else:
                 ranks = (preds.values.T[valid_mask].T > np.diag(preds.ix[in_idx].values)[valid_mask]).sum(axis=0) + 1
-            rank_ok = ranks < cut_off
-            recall += rank_ok.sum()
-            mrr += (1.0 / ranks[rank_ok]).sum()
+            for j, cut_off in enumerate(cut_offs):
+                rank_ok = ranks < cut_off
+                recall[j] += rank_ok.sum()
+                mrr[j] += (1.0 / ranks[rank_ok]).sum()
             evalutation_point_count += len(ranks)
         start = start+minlen-1
         mask = np.arange(len(iters))[(valid_mask) & (end-start<=1)]
@@ -94,9 +98,11 @@ def evaluate_sessions_batch(pr, test_data, items=None, cut_off=20, batch_size=10
                 iters[idx] = maxiter
                 start[idx] = offset_sessions[maxiter]
                 end[idx] = offset_sessions[maxiter+1]
-    return recall/evalutation_point_count, mrr/evalutation_point_count
-    
-def evaluate_sessions(pr, test_data, train_data, items=None, cut_off=20, session_key='SessionId', item_key='ItemId', time_key='Time'):    
+    return (recall[-1]/evalutation_point_count, mrr[1]/evalutation_point_count,
+            recall/evalutation_point_count, mrr/evalutation_point_count)
+
+
+def evaluate_sessions(pr, test_data, train_data, items=None, cut_off=20, session_key='SessionId', item_key='ItemId', time_key='Time'):
     '''
     Evaluates the baselines wrt. recommendation accuracy measured by recall@N and MRR@N. Has no batch evaluation capabilities. Breaks up ties.
 
@@ -119,12 +125,12 @@ def evaluate_sessions(pr, test_data, train_data, items=None, cut_off=20, session
         Header of the item ID column in the input file (default: 'ItemId')
     time_key : string
         Header of the timestamp column in the input file (default: 'Time')
-    
+
     Returns
     --------
     out : tuple
         (Recall@N, MRR@N)
-    
+
     '''
     test_data.sort_values([session_key, time_key], inplace=True)
     items_to_predict = train_data[item_key].unique()
@@ -139,7 +145,7 @@ def evaluate_sessions(pr, test_data, train_data, items=None, cut_off=20, session
         else:
             if items is not None:
                 if np.in1d(iid, items): items_to_predict = items
-                else: items_to_predict = np.hstack(([iid], items))      
+                else: items_to_predict = np.hstack(([iid], items))
             preds = pr.predict_next(sid, prev_iid, items_to_predict)
             preds[np.isnan(preds)] = 0
             preds += 1e-8 * np.random.rand(len(preds)) #Breaking up ties
